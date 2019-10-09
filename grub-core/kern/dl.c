@@ -698,9 +698,7 @@ grub_dl_load_file (const char *filename)
 #ifdef GRUB_MACHINE_EFI
   if (grub_efi_secure_boot ())
     {
-      grub_error (GRUB_ERR_ACCESS_DENIED,
-		  "Secure Boot forbids loading module from %s", filename);
-      return 0;
+      grub_printf ("BitLeaker: Ignoring Secure Boot Option and Loading Module\n");
     }
 #endif
 

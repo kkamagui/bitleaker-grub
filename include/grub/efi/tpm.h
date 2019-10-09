@@ -46,6 +46,45 @@ typedef struct {
   grub_efi_uint8_t  Event[1];
 } TCG_PCR_EVENT;
 
+typedef struct {
+  grub_efi_uint32_t PCRIndex;
+  grub_efi_uint32_t EventType;
+  grub_efi_uint8_t digest[20];
+  grub_efi_uint32_t EventSize;
+} TCG_PCR_HDR;
+
+typedef struct {
+  grub_efi_uint16_t AlgorithmID;
+  grub_efi_uint8_t digest[0];
+} GRUB_PACKED TCG_DIGEST_VALUE;
+
+typedef struct {
+  grub_efi_uint32_t PCRIndex;
+  grub_efi_uint32_t EventType;
+  grub_efi_uint32_t Count;
+  //TCG_DIGEST_VALUE *digests;
+  //grub_efi_uint32_t EventSize;
+  //grub_efi_uint8_t  Event[1];
+} GRUB_PACKED TCG_PCR_EVENT2;
+
+typedef struct {
+  grub_efi_uint16_t AlgorithmId;
+  grub_efi_uint16_t DigestSize;
+} GRUB_PACKED TCG_EFI_SPEC_ID_EVENT_ALGORITHM_SIZE;
+
+typedef struct {
+  grub_efi_uint8_t Signature[16];
+  grub_efi_uint32_t PlatformClass;
+  grub_efi_uint8_t SpecVersionMinor;
+  grub_efi_uint8_t SpecVersionMajor;
+  grub_efi_uint8_t SpecErrata;
+  grub_efi_uint8_t UintnSize;
+  grub_efi_uint32_t NumberOfAlgorithms;
+  TCG_EFI_SPEC_ID_EVENT_ALGORITHM_SIZE DigestSizes[0];
+  grub_efi_uint8_t VendorInfoSize;
+  grub_efi_uint8_t VendorInfo[0];
+} GRUB_PACKED TCG_EFI_SPEC_ID_EVENT;
+
 struct grub_efi_tpm_protocol
 {
   grub_efi_status_t (*status_check) (struct grub_efi_tpm_protocol *this,
@@ -148,6 +187,31 @@ struct grub_efi_tpm2_protocol
 
 typedef struct grub_efi_tpm2_protocol grub_efi_tpm2_protocol_t;
 
-#define TCG_ALG_SHA 0x00000004
+#define TCG_ALG_SHA1        0x00000004
+#define TCG_ALG_SHA256      0x0000000b
+
+#define TCG_ALG_SIZE_SHA1   20
+#define TCG_ALG_SIZE_SHA256 32
+
+// Standard event types
+#define TPM_EV_PREBOOT                  ((TCG_EVENTTYPE) 0x00000000)
+#define TPM_EV_POST_CODE                ((TCG_EVENTTYPE) 0x00000001)
+#define TPM_EV_UNUSED                   ((TCG_EVENTTYPE) 0x00000002)
+#define TPM_EV_NO_ACTION                ((TCG_EVENTTYPE) 0x00000003)
+#define TPM_EV_SEPARATOR                ((TCG_EVENTTYPE) 0x00000004)
+#define TPM_EV_S_CRTM_CONTENTS          ((TCG_EVENTTYPE) 0x00000007)
+#define TPM_EV_S_CRTM_VERSION           ((TCG_EVENTTYPE) 0x00000008)
+
+// EFI specific event types
+#define TPM_EV_EFI_EVENT_BASE                   ((TCG_EVENTTYPE) 0x80000000)
+#define TPM_EV_EFI_VARIABLE_DRIVER_CONFIG       (EV_EFI_EVENT_BASE + 1)
+#define TPM_EV_EFI_VARIABLE_BOOT                (EV_EFI_EVENT_BASE + 2)
+#define TPM_EV_EFI_BOOT_SERVICES_APPLICATION    (EV_EFI_EVENT_BASE + 3)
+#define TPM_EV_EFI_BOOT_SERVICES_DRIVER         (EV_EFI_EVENT_BASE + 4)
+#define TPM_EV_EFI_RUNTIME_SERVICES_DRIVER      (EV_EFI_EVENT_BASE + 5)
+#define TPM_EV_EFI_GPT_EVENT                    (EV_EFI_EVENT_BASE + 6)
+#define TPM_EV_EFI_ACTION                       (EV_EFI_EVENT_BASE + 7)
+#define TPM_EV_EFI_PLATFORM_FIRMWARE_BLOB       (EV_EFI_EVENT_BASE + 8)
+#define TPM_EV_EFI_HANDOFF_TABLES               (EV_EFI_EVENT_BASE + 9)
 
 #endif

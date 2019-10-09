@@ -189,7 +189,7 @@ grub_tpm1_log_event(grub_efi_handle_t tpm_handle, unsigned char *buf,
   event->EventSize = grub_strlen(description) + 1;
   grub_memcpy(event->Event, description, event->EventSize);
 
-  algorithm = TCG_ALG_SHA;
+  algorithm = TCG_ALG_SHA1;
   status = efi_call_7 (tpm->log_extend_event, tpm, (grub_efi_physical_address_t)buf, (grub_uint64_t) size,
 		       algorithm, event, &eventnum, &lastevent);
 

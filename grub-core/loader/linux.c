@@ -5,6 +5,10 @@
 #include <grub/file.h>
 #include <grub/mm.h>
 #include <grub/tpm.h>
+#include <grub/efi/efi.h>
+#include <grub/efi/api.h>
+#include <grub/efi/tpm.h>
+#include <grub/term.h>
 
 struct newc_head
 {
@@ -245,6 +249,249 @@ grub_initrd_close (struct grub_linux_initrd_context *initrd_ctx)
   initrd_ctx->components = 0;
 }
 
+static grub_efi_guid_t tpm_guid = EFI_TPM_GUID;
+static grub_efi_guid_t tpm2_guid = EFI_TPM2_GUID;
+
+char* g_output_addr = (char*)0x80000;
+int g_total_size = 64 * 1024;
+int g_output_count = 0;
+
+static void print_and_dump(const char *fmt, ...)
+{
+  va_list ap;
+  int tmp_count;
+
+  va_start (ap, fmt);
+  tmp_count = grub_vprintf(fmt, ap);
+  va_end (ap);
+
+  va_start (ap, fmt);
+  tmp_count = grub_vsnprintf(g_output_addr + g_output_count, g_total_size - g_output_count, fmt, ap);
+  va_end (ap);
+  g_output_count += tmp_count;
+}
+
+static grub_efi_boolean_t grub_tpm_handle_find(grub_efi_handle_t *tpm_handle,
+                                              grub_efi_uint8_t *protocol_version)
+{
+  grub_efi_handle_t *handles;
+  grub_efi_uintn_t num_handles;
+
+  handles = grub_efi_locate_handle (GRUB_EFI_BY_PROTOCOL, &tpm_guid, NULL,
+                                   &num_handles);
+  if (handles && num_handles > 0) {
+    *tpm_handle = handles[0];
+    *protocol_version = 1;
+    return 1;
+  }
+
+  handles = grub_efi_locate_handle (GRUB_EFI_BY_PROTOCOL, &tpm2_guid, NULL,
+                                   &num_handles);
+  if (handles && num_handles > 0) {
+    *tpm_handle = handles[0];
+    *protocol_version = 2;
+    return 1;
+  }
+
+
+  return 0;
+}
+
+#ifdef TPM_SHA1_LOG_FORAMT
+/*
+ * Save event logs for event version 1
+ */
+static grub_err_t
+tpm_save_event_log_v1(void)
+{
+  grub_efi_status_t status;
+  grub_efi_tpm2_protocol_t *tpm;
+  grub_efi_physical_address_t start;
+  grub_efi_physical_address_t end;
+  grub_efi_physical_address_t cur;
+  grub_efi_boolean_t trunc;
+  grub_efi_handle_t tpm_handle;
+  grub_uint8_t protocol_version;
+  TCG_PCR_EVENT *event;
+  int event_version;
+  int count = 0;
+  int i;
+
+  grub_printf("tpm event log show\n");
+
+  if (!grub_tpm_handle_find(&tpm_handle, &protocol_version))
+  {
+    grub_printf("tpm_handle find error\n");
+    return 0;
+  }
+
+  event_version = 1;
+  print_and_dump("evet_version = %d\n", event_version);
+  print_and_dump("TCG_PCR_EVENT size %lu TCG_PCR_HDR %lu\n", sizeof(TCG_PCR_EVENT), sizeof(TCG_PCR_HDR));
+
+  tpm = grub_efi_open_protocol (tpm_handle, &tpm2_guid,
+                               GRUB_EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+  status = efi_call_5 (tpm->get_event_log, tpm, event_version, &start, &end, &trunc);
+
+  switch (status) {
+  case GRUB_EFI_SUCCESS:
+    break;
+  case GRUB_EFI_DEVICE_ERROR:
+    return grub_error (GRUB_ERR_IO, N_("Command failed"));
+  case GRUB_EFI_INVALID_PARAMETER:
+    return grub_error (GRUB_ERR_BAD_ARGUMENT, N_("Invalid parameter"));
+  case GRUB_EFI_BUFFER_TOO_SMALL:
+    return grub_error (GRUB_ERR_BAD_ARGUMENT, N_("Output buffer too small"));
+  case GRUB_EFI_NOT_FOUND:
+    return grub_error (GRUB_ERR_UNKNOWN_DEVICE, N_("TPM unavailable"));
+  default:
+    return grub_error (GRUB_ERR_UNKNOWN_DEVICE, N_("Unknown TPM error"));
+  }
+
+  print_and_dump("Start %p, End %p, Trunc %d\n", (void*)start, (void*)end, trunc);
+
+  for (cur = start ; cur <= end ; )
+  {
+    count++;
+    event = (TCG_PCR_EVENT *)cur;
+
+    print_and_dump("[%d] PCR %d, Event %x, Event Size %d, SHA1= ",
+      count, event->PCRIndex, event->EventType, event->EventSize);
+
+    for (i = 0 ; i < 20 ; i++)
+    {
+      print_and_dump("%02x ", (event->digest[i]) & 0xFF);
+    }
+    print_and_dump("\n");
+
+    cur = cur + sizeof(TCG_PCR_HDR) + event->EventSize;
+    grub_refresh();
+  }
+
+  return 0;
+}
+#endif
+
+/*
+ * Save event logs for event version 2
+ */
+static grub_err_t
+tpm_save_event_log_v2(void)
+{
+  grub_efi_status_t status;
+  grub_efi_tpm2_protocol_t *tpm;
+  grub_efi_physical_address_t start;
+  grub_efi_physical_address_t end;
+  grub_efi_physical_address_t cur;
+  grub_efi_boolean_t trunc;
+  grub_efi_handle_t tpm_handle;
+  grub_uint8_t protocol_version;
+  TCG_PCR_EVENT2 *event;
+  TCG_PCR_EVENT *event_header;
+  TCG_DIGEST_VALUE *digest;
+  int event_version;
+  int count = 0;
+  int index_in_event;
+  grub_efi_uint32_t digest_index;
+  int event_size;
+  int i;
+
+  grub_printf("tpm event log show\n");
+
+  if (!grub_tpm_handle_find(&tpm_handle, &protocol_version))
+  {
+    grub_printf("tpm_handle find error\n");
+    return 0;
+  }
+
+  event_version = 2;
+  print_and_dump("evet_version = %d\n", event_version);
+  print_and_dump("TCG_PCR_EVENT size %lu TCG_PCR_EVENT2 size %lu\n", sizeof(TCG_PCR_EVENT), sizeof(TCG_PCR_EVENT2));
+  grub_printf("Press any key to dump PCRs...\n");
+  grub_getkey();
+
+  tpm = grub_efi_open_protocol (tpm_handle, &tpm2_guid,
+                               GRUB_EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+  status = efi_call_5 (tpm->get_event_log, tpm, event_version, &start, &end, &trunc);
+
+  switch (status) {
+  case GRUB_EFI_SUCCESS:
+    break;
+  case GRUB_EFI_DEVICE_ERROR:
+    return grub_error (GRUB_ERR_IO, N_("Command failed"));
+  case GRUB_EFI_INVALID_PARAMETER:
+    return grub_error (GRUB_ERR_BAD_ARGUMENT, N_("Invalid parameter"));
+  case GRUB_EFI_BUFFER_TOO_SMALL:
+    return grub_error (GRUB_ERR_BAD_ARGUMENT, N_("Output buffer too small"));
+  case GRUB_EFI_NOT_FOUND:
+    return grub_error (GRUB_ERR_UNKNOWN_DEVICE, N_("TPM unavailable"));
+  default:
+    return grub_error (GRUB_ERR_UNKNOWN_DEVICE, N_("Unknown TPM error"));
+  }
+
+  print_and_dump("Start %p, End %p, Trunc %d\n", (void*)start, (void*)end, trunc);
+
+  // First one is spefic header, so skip it
+  event_header = (TCG_PCR_EVENT*) start;
+  cur = (start + sizeof(TCG_PCR_HDR) + event_header->EventSize);
+  while (cur <= end)
+  {
+    count++;
+    event = (TCG_PCR_EVENT2 *)cur;
+
+    grub_printf("Digest Count=%d.\n", event->Count);
+
+    index_in_event = sizeof(TCG_PCR_EVENT2);
+    for (digest_index = 0 ; digest_index < event->Count ; digest_index++)
+    {
+      digest = (TCG_DIGEST_VALUE *)(cur + index_in_event);
+      switch(digest->AlgorithmID)
+      {
+        case TCG_ALG_SHA1:
+          grub_printf("Digest is SHA1, Print it\n");
+          grub_printf("[%d] PCR %d, Event %x, SHA1= ",
+            count, event->PCRIndex, event->EventType);
+          for (i = 0 ; i < TCG_ALG_SIZE_SHA1 ; i++)
+          {
+            grub_printf("%02x ", (digest->digest[i]) & 0xFF);
+          }
+          grub_printf("\n");
+
+          index_in_event += TCG_ALG_SIZE_SHA1 + sizeof(TCG_DIGEST_VALUE);
+          break;
+
+        case TCG_ALG_SHA256:
+          grub_printf("Digest is SHA256, Dump it\n");
+          print_and_dump("[%d] PCR %d, Event %x, SHA256= ",
+            count, event->PCRIndex, event->EventType);
+
+          for (i = 0 ; i < TCG_ALG_SIZE_SHA256 ; i++)
+          {
+            print_and_dump("%02x ", (digest->digest[i]) & 0xFF);
+          }
+          print_and_dump("\n");
+
+          index_in_event += TCG_ALG_SIZE_SHA256 + sizeof(TCG_DIGEST_VALUE);
+          break;
+
+        default:
+          print_and_dump("Unsupported algorithm, Algorithm ID=%d\n", digest->AlgorithmID);
+          return grub_error (GRUB_ERR_UNKNOWN_DEVICE, N_("Unknown TPM error"));
+          break;
+      }
+    }
+    // Get event size and skip it
+    event_size = *(grub_efi_uint32_t *)(cur + index_in_event);
+    index_in_event += event_size + sizeof(grub_efi_uint32_t);
+
+    // Go to the next item.
+    cur = cur + index_in_event;
+    grub_refresh();
+  }
+
+  return 0;
+}
+
 grub_err_t
 grub_initrd_load (struct grub_linux_initrd_context *initrd_ctx,
 		  char *argv[], void *target)
@@ -300,6 +547,16 @@ grub_initrd_load (struct grub_linux_initrd_context *initrd_ctx,
       ptr += ALIGN_UP_OVERHEAD (cursize, 4);
       ptr = make_header (ptr, "TRAILER!!!", sizeof ("TRAILER!!!") - 1, 0, 0);
     }
+
+  // Save TPM event log
+  // SHA1 format
+#ifdef TPM_SHA1_LOG_FORAMT
+  tpm_save_event_log_v1();
+#else
+  // SHA256 format
+  tpm_save_event_log_v2();
+#endif
+
   free_dir (root);
   root = 0;
   return GRUB_ERR_NONE;

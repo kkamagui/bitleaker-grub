@@ -52,27 +52,6 @@ struct grub_efi_shim_lock
 };
 typedef struct grub_efi_shim_lock grub_efi_shim_lock_t;
 
-static grub_efi_boolean_t
-grub_linuxefi_secure_validate (void *data, grub_uint32_t size)
-{
-  grub_efi_guid_t guid = SHIM_LOCK_GUID;
-  grub_efi_shim_lock_t *shim_lock;
-
-  shim_lock = grub_efi_locate_protocol(&guid, NULL);
-
-  if (!shim_lock) {
-    if (grub_efi_secure_boot())
-      return 0;
-    else
-      return 1;
-  }
-
-  if (shim_lock->verify(data, size) == GRUB_EFI_SUCCESS)
-    return 1;
-
-  return 0;
-}
-
 typedef void(*handover_func)(void *, grub_efi_system_table_t *, struct linux_kernel_params *);
 
 static grub_err_t
@@ -228,13 +207,6 @@ grub_cmd_linux (grub_command_t cmd __attribute__ ((unused)),
 
   grub_tpm_measure (kernel, filelen, GRUB_BINARY_PCR, "grub_linuxefi", "Kernel");
   grub_print_error();
-
-  if (! grub_linuxefi_secure_validate (kernel, filelen))
-    {
-      grub_error (GRUB_ERR_INVALID_COMMAND, N_("%s has invalid signature"), argv[0]);
-      grub_free (kernel);
-      goto fail;
-    }
 
   params = grub_efi_allocate_pages_max (0x3fffffff, BYTES_TO_PAGES(16384));
 
