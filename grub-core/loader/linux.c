@@ -474,6 +474,15 @@ tpm_save_event_log_v2(void)
           index_in_event += TCG_ALG_SIZE_SHA256 + sizeof(TCG_DIGEST_VALUE);
           break;
 
+	  // Skip SHA384 and SHA512
+        case TCG_ALG_SHA384:
+          index_in_event += TCG_ALG_SIZE_SHA384 + sizeof(TCG_DIGEST_VALUE);
+	  break;
+
+	case TCG_ALG_SHA512:
+          index_in_event += TCG_ALG_SIZE_SHA512 + sizeof(TCG_DIGEST_VALUE);
+	  break;
+
         default:
           print_and_dump("Unsupported algorithm, Algorithm ID=%d\n", digest->AlgorithmID);
           return grub_error (GRUB_ERR_UNKNOWN_DEVICE, N_("Unknown TPM error"));

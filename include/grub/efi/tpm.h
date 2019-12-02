@@ -189,9 +189,14 @@ typedef struct grub_efi_tpm2_protocol grub_efi_tpm2_protocol_t;
 
 #define TCG_ALG_SHA1        0x00000004
 #define TCG_ALG_SHA256      0x0000000b
+#define TCG_ALG_SHA384      0x0000000c
+#define TCG_ALG_SHA512      0x0000000d
 
 #define TCG_ALG_SIZE_SHA1   20
 #define TCG_ALG_SIZE_SHA256 32
+#define TCG_ALG_SIZE_SHA384 48
+#define TCG_ALG_SIZE_SHA512 64
+
 
 // Standard event types
 #define TPM_EV_PREBOOT                  ((TCG_EVENTTYPE) 0x00000000)
